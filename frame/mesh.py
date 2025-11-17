@@ -44,14 +44,7 @@ class Mesh1D(abc.ABC):
         """ Set the precision of float tensor attributes
         """
         # Float tensor attributes that need to be set the float type
-        float_tensor_attributes_name = [
-            "nodes"
-        ]
-        for attribute_name in float_tensor_attributes_name:
-            # Get attributes
-            tensor = getattr(self, attribute_name)
-            # Change the float type and then set the attributes
-            setattr(self, attribute_name, tensor.to(float_type))
+        self.nodes = self.nodes.to(float_type)
         # Set up the float_type attributes
         self.float_type = float_type
         return self
@@ -59,36 +52,21 @@ class Mesh1D(abc.ABC):
     def double(self):
         """ Set the precision of float tensor attributes to float64
         """
-        float_tensor_attributes_name = [
-            "nodes"
-        ]
-        for attribute_name in float_tensor_attributes_name:
-            tensor = getattr(self, attribute_name)
-            setattr(self, attribute_name, tensor.double())
+        self.nodes = self.nodes.double()
         self.float_type = torch.float64
         return self
     
     def float(self):
         """ Set the precision of float tensor attributes to float32
         """
-        float_tensor_attributes_name = [
-            "nodes"
-        ]
-        for attribute_name in float_tensor_attributes_name:
-            tensor = getattr(self, attribute_name)
-            setattr(self, attribute_name, tensor.float())
+        self.nodes = self.nodes.float()
         self.float_type = torch.float32
         return self
     
     def half(self):
         """ Set the precision of float tensor attributes to float16
         """
-        float_tensor_attributes_name = [
-            "nodes"
-        ]
-        for attribute_name in float_tensor_attributes_name:
-            tensor = getattr(self, attribute_name)
-            setattr(self, attribute_name, tensor.half())
+        self.nodes = self.nodes.half()
         self.float_type = torch.float16
         return self
 
@@ -99,10 +77,8 @@ class Mesh1D(abc.ABC):
             nodes (torch.Tensor): shape = (num_nodes,)
             elements (torch.Tensor): shape = (num_nodes - 1, 2)
         """
-        nodes = torch.linspace(
-            0.0, 1.0, self.num_nodes, dtype=self.float_type, device=self.device)
-        nodes_indices = torch.arange(
-            self.num_nodes, dtype=torch.int64, device=self.device).view(-1, 1)
+        nodes = torch.linspace(0.0, 1.0, self.num_nodes, dtype=self.float_type, device=self.device)
+        nodes_indices = torch.arange(self.num_nodes, dtype=torch.int64, device=self.device).unsqueeze(-1)
         elements = torch.hstack((nodes_indices[:-1], nodes_indices[1:]))
         return nodes, elements
     

@@ -28,44 +28,35 @@ class FiniteElementElliptic1D(abc.ABC):
         # Define the device
         self.device: torch.device = device
         # Generate the mesh
-        self.num_levels = num_levels
-        self.num_nodes = 2 ** num_levels + 1
-        mesh = Mesh1D(n=2 ** num_levels, float_type=self.float_type, device=self.device)
-        self.nodes: torch.Tensor = mesh.nodes
-        self.elements: torch.Tensor = mesh.elements
-        self.num_nodes: int = self.nodes.size(0)
+        self.num_levels: int = num_levels
+        self.mesh_per_level: Tuple[Mesh1D, ...] = tuple(
+            Mesh1D(n=2 ** (idx_level + 1), float_type=self.float_type, device=self.device)
+            for idx_level in range(self.num_levels))
+        self.nodes: torch.Tensor = self.mesh_per_level[-1].nodes
+        self.num_nodes = self.nodes.size(0)
+        self.elements: torch.Tensor = self.mesh_per_level[-1].elements
+        self.num_dofs: int = self.num_nodes
         self.num_elements: int = self.elements.size(0)
-        # Degrees of freedom (DoFs)
-        self.num_dofs: int =  self.num_nodes
-        self.dofs = torch.arange(self.num_dofs, dtype=torch.int64, device=self.device)
-        self.dirichlet_dofs = self.dofs[mesh.dirichlet_mask]
-        self.free_dofs_mask = torch.ones(self.num_dofs, dtype=torch.bool, device=self.device)
-        self.free_dofs_mask[self.dirichlet_dofs] = False
-        self.free_dofs = self.dofs[self.free_dofs_mask]
-        self.num_free_dofs = self.free_dofs.size(0)
-        # Preconditioning
+        self.free_dofs: torch.Tensor = self.mesh_per_level[-1].free_dofs
+        self.num_free_dofs: int = self.free_dofs.size(0)
+        # Combination of differential operator and frame
         self.num_coefficients = sum(2 ** (k + 1) - 1 for k in range(num_levels))
         self.sqrt_diag_inv_per_level = _compute_sqrt_laplacian_diag_inv_per_level(
-            num_levels=self.num_levels,
-            float_type=self.float_type,
-            device=self.device
+            mesh_per_level=self.mesh_per_level
         )
-        self.diff_frame_scaled_per_level = _diff_frame_scaled_per_level(
-            num_levels=num_levels,
-            sqrt_diag_inv_per_level=self.sqrt_diag_inv_per_level,
-            float_type=self.float_type,
-            device=self.device
-        )
-        # decomposition
-        element_nodes_coords = mesh.nodes[mesh.elements]
+        # quadrature points and their element index
+        element_nodes_coords = self.nodes[self.elements]
         quadrature_points = 0.5 * (element_nodes_coords[:, 0] + element_nodes_coords[:, 1])
         self.index_elements_per_level = _compute_quadrature_points_element_index_per_level(
-            num_levels=self.num_levels,
+            mesh_per_level=self.mesh_per_level,
             quadrature_points=quadrature_points
         )
-        self.mesh_per_level: Tuple[Mesh1D, ...] = tuple(Mesh1D(n=2 ** (idx_level + 1), float_type=self.float_type, device=self.device)
-                          for idx_level in range(self.num_levels))
-        
+        # explicit differential-frame matrix
+        self.diff_frame_scaled_per_level = _diff_frame_scaled_per_level(
+            mesh_per_level=self.mesh_per_level,
+            index_element_per_level=self.index_elements_per_level,
+            sqrt_diag_inv_per_level=self.sqrt_diag_inv_per_level
+        )
 
     def to(self, device: torch.device):
         device = torch.device(device)
@@ -488,36 +479,36 @@ def _assemble_laplacian_diag(
     return laplacian_diag[free_dofs]
 
 def _assemble_laplacian_diag_level(
-        idx_level: int,
-        float_type: torch.dtype,
-        device: torch.device,
+        mesh_level: Mesh1D,
         ):
+    device = mesh_level.device
     # Generate the mesh for this level
-    mesh = Mesh1D(n=2 ** (idx_level + 1), float_type=float_type, device=device)
-    num_nodes = mesh.num_nodes
+    num_nodes = mesh_level.num_nodes
     num_dofs = num_nodes
     dofs = torch.arange(num_dofs, dtype=torch.int64, device=device)
     free_dofs_mask = torch.ones(num_dofs, dtype=torch.bool, device=device)
-    free_dofs_mask[dofs[mesh.dirichlet_mask]] = False
+    free_dofs_mask[dofs[mesh_level.dirichlet_mask]] = False
     free_dofs = dofs[free_dofs_mask]
     # Compute the diagonal matrix 
     laplacian_diag = _assemble_laplacian_diag(
-        nodes=mesh.nodes, 
-        elements=mesh.elements,
-        free_dofs=free_dofs)
+        nodes=mesh_level.nodes, 
+        elements=mesh_level.elements,
+        free_dofs=free_dofs
+    )
     # Compute the inverse of the diagonal matrix
     return laplacian_diag
 
 def _compute_sqrt_laplacian_diag_inv_per_level(
-        num_levels: int,
-        float_type: torch.dtype,
-        device: torch.device,
+        mesh_per_level: Tuple[Mesh1D, ...],
         ) -> torch.Tensor:
+    num_levels = len(mesh_per_level)
+    float_type = mesh_per_level[0].float_type
+    device = mesh_per_level[0].device
     num_free_dofs_finest = 2 ** num_levels - 1
     sqrt_laplacian_diag_inv = torch.zeros(num_levels, num_free_dofs_finest, dtype=float_type, device=device)
     for idx_level in range(num_levels):
         num_free_dofs_current_level = 2 ** (idx_level + 1) - 1
-        laplacian_diag = _assemble_laplacian_diag_level(idx_level=idx_level, float_type=float_type, device=device)
+        laplacian_diag = _assemble_laplacian_diag_level(mesh_level=mesh_per_level[idx_level])
         sqrt_laplacian_diag_inv[idx_level, :num_free_dofs_current_level] = torch.sqrt(1.0 / laplacian_diag)
     return sqrt_laplacian_diag_inv
 
@@ -567,73 +558,13 @@ def _assemble_differential_matrix(
         mat[idx_element, element] = local_differential[idx_element]
     return mat[:, free_dofs]
 
-def _diff_frame_level(
-        idx_level: int,
-        quadrature_points: torch.Tensor,
-        float_type: torch.dtype,
-        device: torch.device,
-        ) -> torch.Tensor:
-    # Generate the mesh for this level
-    mesh = Mesh1D(n=2 ** (idx_level + 1), float_type=float_type, device=device)
-    nodes = mesh.nodes 
-    elements = mesh.elements
-    num_dofs = nodes.size(0)
-    dofs = torch.arange(num_dofs, dtype=torch.int64, device=device)
-    dirichlet_dofs = dofs[mesh.dirichlet_mask]
-    free_dofs_mask = torch.ones(num_dofs, dtype=torch.bool, device=device)
-    free_dofs_mask[dirichlet_dofs] = False
-    free_dofs = dofs[free_dofs_mask]
-    # element_nodes_coords.shape = (num_elements, 2)
-    element_nodes_coords = nodes[elements]
-    end_point_min = torch.min(input=element_nodes_coords, dim=1, keepdim=True)[0]
-    end_point_max = torch.max(input=element_nodes_coords, dim=1, keepdim=True)[0]
-    # quadrature_points.shape = (num_points, 1)
-    # index_mask.shape = (num_points, num_elements)
-    quadrature_points = quadrature_points.unsqueeze(-1)
-    index_mask = (quadrature_points >= end_point_min.T) & (quadrature_points < end_point_max.T)
-    index_element = torch.arange(elements.size(0)).expand(quadrature_points.size(0), -1)
-    # index_element.shape = (num_points,)
-    index_element = index_element[index_mask]
-    # mat.shape = (num_elements, num_free_dofs)
-    mat = _assemble_differential_matrix(nodes=nodes, elements=elements, free_dofs=free_dofs)
-    return mat[index_element, :]
-
-def _diff_frame_scaled_per_level(
-        num_levels: int,
-        sqrt_diag_inv_per_level: torch.Tensor,
-        float_type: torch.dtype,
-        device: torch.device,
-        ) -> torch.Tensor:
-    mesh = Mesh1D(n=2 ** num_levels, float_type=float_type, device=device)
-    element_nodes_coords = mesh.nodes[mesh.elements]
-    midpoint = 0.5 * (element_nodes_coords[:, 0] + element_nodes_coords[:, 1])
-    num_coefficients = sum(2 ** (k + 1) - 1 for k in range(num_levels))
-    scaled_mat = torch.zeros(midpoint.size(0), num_coefficients, dtype=float_type, device=device)
-    # loop
-    coeff_start_idx = 0
-    for idx_level in range(num_levels):
-        num_nodes_current_level = 2 ** (idx_level + 1) - 1
-        coeff_end_idx = coeff_start_idx + num_nodes_current_level
-        sqrt_diag_inv_current = sqrt_diag_inv_per_level[idx_level, :num_nodes_current_level]
-        mat = _diff_frame_level(
-            idx_level=idx_level, 
-            quadrature_points=midpoint,
-            float_type=float_type,
-            device=device)
-        scaled_mat[:, coeff_start_idx:coeff_end_idx] = mat * sqrt_diag_inv_current
-        coeff_start_idx = coeff_end_idx
-    return scaled_mat
-
 def _compute_quadrature_points_element_index_level(
-        idx_level: int,
+        mesh_level: Mesh1D,
         quadrature_points: torch.Tensor,
         ):
-    float_type = quadrature_points.dtype
-    device = quadrature_points.device
     # Generate the mesh for this level
-    mesh = Mesh1D(n=2 ** (idx_level + 1), float_type=float_type, device=device)
-    nodes = mesh.nodes 
-    elements = mesh.elements
+    nodes = mesh_level.nodes 
+    elements = mesh_level.elements
     # element_nodes_coords.shape = (num_elements, 2)
     element_nodes_coords = nodes[elements]
     end_point_min = torch.min(input=element_nodes_coords, dim=1, keepdim=True)[0]
@@ -647,16 +578,51 @@ def _compute_quadrature_points_element_index_level(
     index_element = index_element[index_mask]
     return index_element
 
+def _diff_frame_level(
+        mesh_level: Mesh1D,
+        index_element_level: torch.Tensor,
+        ) -> torch.Tensor:
+    nodes = mesh_level.nodes 
+    elements = mesh_level.elements
+    free_dofs = mesh_level.free_dofs
+    mat = _assemble_differential_matrix(nodes=nodes, elements=elements, free_dofs=free_dofs)
+    return mat[index_element_level, :]
+
+def _diff_frame_scaled_per_level(
+        mesh_per_level: Tuple[Mesh1D, ...],
+        index_element_per_level: torch.Tensor,
+        sqrt_diag_inv_per_level: torch.Tensor,
+        ) -> torch.Tensor:
+    float_type = sqrt_diag_inv_per_level.dtype
+    device = sqrt_diag_inv_per_level.device
+    num_levels = len(mesh_per_level)
+    num_coefficients = sum(2 ** (k + 1) - 1 for k in range(num_levels))
+    num_points = index_element_per_level.size(0)
+    scaled_mat = torch.zeros(num_points, num_coefficients, dtype=float_type, device=device)
+    coeff_start_idx = 0
+    for idx_level in range(num_levels):
+        num_nodes_current_level = 2 ** (idx_level + 1) - 1
+        coeff_end_idx = coeff_start_idx + num_nodes_current_level
+        sqrt_diag_inv_current = sqrt_diag_inv_per_level[idx_level, :num_nodes_current_level]
+        mat = _diff_frame_level(
+            mesh_level=mesh_per_level[idx_level], 
+            index_element_level=index_element_per_level[:, idx_level]
+        )
+        scaled_mat[:, coeff_start_idx:coeff_end_idx] = mat * sqrt_diag_inv_current
+        coeff_start_idx = coeff_end_idx
+    return scaled_mat
+
 def _compute_quadrature_points_element_index_per_level(
-        num_levels: int,
+        mesh_per_level: Tuple[Mesh1D, ...],
         quadrature_points: torch.Tensor,
         ) -> torch.Tensor:
     device = quadrature_points.device
     num_points = quadrature_points.size(0)
+    num_levels = len(mesh_per_level)
     index_element_per_level = torch.zeros(num_points, num_levels, dtype=torch.int64, device=device)
     for idx_level in range(num_levels):
         index_element_per_level[:, idx_level] = _compute_quadrature_points_element_index_level(
-            idx_level=idx_level,
+            mesh_level=mesh_per_level[idx_level],
             quadrature_points=quadrature_points,
         )
     return index_element_per_level
