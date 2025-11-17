@@ -73,11 +73,13 @@ class FiniteElementElliptic1D(abc.ABC):
         tensor_attributes_name = [
             "nodes", "elements", "dofs", "dirichlet_dofs", 
             "free_dofs_mask", "free_dofs", "sqrt_diag_inv_per_level",
-            "one_side_grad_frame", "one_side_div_frame"
+            "index_elements_per_level"
         ]
         for attribute_name in tensor_attributes_name:
             tensor = getattr(self, attribute_name)
             setattr(self, attribute_name, tensor.to(device))
+        for mesh in self.mesh_per_level:
+            mesh = mesh.to(device)
         self.device = device 
         return self
     
@@ -88,11 +90,12 @@ class FiniteElementElliptic1D(abc.ABC):
         # List of tensor attributes
         float_tensor_attributes_name = [
             "nodes", "sqrt_diag_inv_per_level",
-            "one_side_grad_frame", "one_side_div_frame"
         ]
         for attribute_name in float_tensor_attributes_name:
             float_tensor = getattr(self, attribute_name)
             setattr(self, attribute_name, float_tensor.double())
+        for mesh in self.mesh_per_level:
+            mesh = mesh.double()
         self.float_type = torch.float64 
         return self
     
@@ -100,11 +103,12 @@ class FiniteElementElliptic1D(abc.ABC):
         # List of tensor attributes
         float_tensor_attributes_name = [
             "nodes", "sqrt_diag_inv_per_level",
-            "one_side_grad_frame", "one_side_div_frame"
         ]
         for attribute_name in float_tensor_attributes_name:
             float_tensor = getattr(self, attribute_name)
             setattr(self, attribute_name, float_tensor.float())
+        for mesh in self.mesh_per_level:
+            mesh = mesh.float()
         self.float_type = torch.float32
         return self
     
@@ -112,11 +116,12 @@ class FiniteElementElliptic1D(abc.ABC):
         # List of tensor attributes
         float_tensor_attributes_name = [
             "nodes", "sqrt_diag_inv_per_level",
-            "one_side_grad_frame", "one_side_div_frame"
         ]
         for attribute_name in float_tensor_attributes_name:
             float_tensor = getattr(self, attribute_name)
             setattr(self, attribute_name, float_tensor.half())
+        for mesh in self.mesh_per_level:
+            mesh = mesh.half()
         self.float_type = torch.float16
         return self
     

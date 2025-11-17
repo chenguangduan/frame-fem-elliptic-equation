@@ -1,11 +1,8 @@
 
 import torch
-import matplotlib.pyplot as plt
-import numpy as np
 
 from frame.pde import ParametricEllipticPDE
-from frame.mesh import Mesh1D
-from frame.fe import FiniteElementElliptic1D, _diff_frame_scaled_vec_prod_per_level, _diff_frame_scaled_trans_vec_prod_per_level
+from frame.fe import FiniteElementElliptic1D
 
 def diffusion_param_fn(
     param: torch.Tensor, 
@@ -38,7 +35,7 @@ def compute_condition_number(mat):
     return cond
 
 def main():
-    float_type = torch.float64
+    float_type = torch.float16
     device = torch.device("cpu")
 
     param = torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=float_type, device=device)
@@ -56,9 +53,9 @@ def main():
         float_type=float_type, 
         device=device)
     
-    diff_frame_scaled_per_level = fe.diff_frame_scaled_per_level
-    cond = compute_condition_number(diff_frame_scaled_per_level)
-    print(f"number of levels = {num_levels}, condition number = {cond}")
+    #diff_frame_scaled_per_level = fe.diff_frame_scaled_per_level
+    #cond = compute_condition_number(diff_frame_scaled_per_level)
+    #print(f"number of levels = {num_levels}, condition number = {cond}")
 
     num_coefficients = fe.num_coefficients
     test_coefficient = torch.rand(1, num_coefficients, dtype=float_type, device=device)
@@ -73,10 +70,11 @@ def main():
         input_coefficient=test_coefficient
     )
     # original
-    output = fe.assemble_frame_mat_coef_prod(
+    fe_double = fe.double()
+    output = fe_double.assemble_frame_mat_coef_prod(
         param=param,
         input_coefficient=test_coefficient
-    )
+    ).to(float_type)
     print(f"norm without decomposition = {torch.norm(output).item():>.4e}")
     print(f"norm with decomposition = {torch.norm(output_decomposition).item():>.4e}")
     print(f"norm with decomposition = {torch.norm(output_decomposition_mat).item():>.4e}")

@@ -29,7 +29,7 @@ class Mesh1D(abc.ABC):
         device = torch.device(device)
         # Tensor attributes that need to be move
         tensor_attributes_name = [
-            "nodes", "elements", "dirichlet_mask"
+            "nodes", "elements", "dirichlet_mask", "free_dofs"
         ]
         for attribute_name in tensor_attributes_name:
             # Get attributes 
