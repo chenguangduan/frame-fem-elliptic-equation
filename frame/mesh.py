@@ -21,6 +21,7 @@ class Mesh1D(abc.ABC):
         self.num_elements = self.elements.size(0)
         # Get Dirichlet degrees of freedom
         self.dirichlet_mask: torch.Tensor = self._compute_dirichlet_mask()
+        self.free_dofs = self._compute_free_dofs()
 
     def to(self, device: torch.device):
         """ Move tensor atttibutes to device
@@ -101,7 +102,7 @@ class Mesh1D(abc.ABC):
         nodes = torch.linspace(
             0.0, 1.0, self.num_nodes, dtype=self.float_type, device=self.device)
         nodes_indices = torch.arange(
-            self.num_nodes, dtype=torch.int32, device=self.device).view(-1, 1)
+            self.num_nodes, dtype=torch.int64, device=self.device).view(-1, 1)
         elements = torch.hstack((nodes_indices[:-1], nodes_indices[1:]))
         return nodes, elements
     
@@ -118,4 +119,12 @@ class Mesh1D(abc.ABC):
         dirichlet_mask_right = torch.abs(self.nodes - 1.0) < eps
         dirichlet_mask = dirichlet_mask_left | dirichlet_mask_right 
         return dirichlet_mask.to(self.device)
+    
+    def _compute_free_dofs(self):
+        num_dofs = self.num_nodes
+        dofs = torch.arange(num_dofs, dtype=torch.int64, device=self.device)
+        dirichlet_dofs = dofs[self.dirichlet_mask]
+        free_dofs_mask = torch.ones(num_dofs, dtype=torch.bool, device=self.device)
+        free_dofs_mask[dirichlet_dofs] = False
+        return dofs[free_dofs_mask]
     

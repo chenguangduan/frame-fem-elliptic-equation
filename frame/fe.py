@@ -37,7 +37,7 @@ class FiniteElementElliptic1D(abc.ABC):
         self.num_elements: int = self.elements.size(0)
         # Degrees of freedom (DoFs)
         self.num_dofs: int =  self.num_nodes
-        self.dofs = torch.arange(self.num_dofs, dtype=torch.int32, device=self.device)
+        self.dofs = torch.arange(self.num_dofs, dtype=torch.int64, device=self.device)
         self.dirichlet_dofs = self.dofs[mesh.dirichlet_mask]
         self.free_dofs_mask = torch.ones(self.num_dofs, dtype=torch.bool, device=self.device)
         self.free_dofs_mask[self.dirichlet_dofs] = False
@@ -56,6 +56,16 @@ class FiniteElementElliptic1D(abc.ABC):
             float_type=self.float_type,
             device=self.device
         )
+        # decomposition
+        element_nodes_coords = mesh.nodes[mesh.elements]
+        quadrature_points = 0.5 * (element_nodes_coords[:, 0] + element_nodes_coords[:, 1])
+        self.index_elements_per_level = _compute_quadrature_points_element_index_per_level(
+            num_levels=self.num_levels,
+            quadrature_points=quadrature_points
+        )
+        self.mesh_per_level: Tuple[Mesh1D, ...] = tuple(Mesh1D(n=2 ** (idx_level + 1), float_type=self.float_type, device=self.device)
+                          for idx_level in range(self.num_levels))
+        
 
     def to(self, device: torch.device):
         device = torch.device(device)
@@ -174,14 +184,55 @@ class FiniteElementElliptic1D(abc.ABC):
         )
         return vector_finest
     
+    def assemble_frame_mat_coef_prod_decomposition(
+            self, 
+            param: torch.Tensor,
+            input_coefficient: torch.Tensor,
+            ):
+        diff_frame_prod = _diff_frame_scaled_vec_prod_per_level(
+            mesh_per_level=self.mesh_per_level,
+            index_elements_per_level=self.index_elements_per_level,
+            sqrt_diag_inv_per_level=self.sqrt_diag_inv_per_level,
+            input_coefficients=input_coefficient
+        )
+        param_diag = _assemble_parametric_diag(
+            param=param,
+            diffusion_param_fn=self.param_pde.diffusion_param_fn,
+            element_nodes_coords=self.nodes[self.elements]
+        )
+        return _diff_frame_scaled_trans_vec_prod_per_level(
+            mesh_per_level=self.mesh_per_level,
+            index_elements_per_level=self.index_elements_per_level,
+            sqrt_diag_inv_per_level=self.sqrt_diag_inv_per_level,
+            input_vec=diff_frame_prod * param_diag
+        )
+    
+    def assemble_frame_mat_coef_prod_decomposition_mat(
+            self, 
+            param: torch.Tensor,
+            input_coefficient: torch.Tensor,
+            ):
+        param_diag = _assemble_parametric_diag(
+            param=param,
+            diffusion_param_fn=self.param_pde.diffusion_param_fn,
+            element_nodes_coords=self.nodes[self.elements]
+        )
+        diff_frame_scaled_coeff_prod = torch.einsum(
+            "ec,bc->be", 
+            self.diff_frame_scaled_per_level,
+            input_coefficient)
+        output = torch.einsum(
+            "ec,be->bc",
+            self.diff_frame_scaled_per_level,
+            param_diag * diff_frame_scaled_coeff_prod
+        )
+        return output
+    
     def assemble_frame_mat_coef_prod(
             self, 
             param: torch.Tensor,
             input_coefficient: torch.Tensor,
             ) -> torch.Tensor:
-        """ Compute F*AFc, where c is the input coefficient, 
-        and F* and F is the analysis operator and synthesis operator, respectively.
-        """
         # param.shape = (batch_size, dim(param))
         # input_coefficient.shape = (batch_size, num_coefficients)
         assert param.ndim == 2 and input_coefficient.ndim == 2
@@ -214,8 +265,6 @@ class FiniteElementElliptic1D(abc.ABC):
             vector_finest=mat_vec_prod_reduced)
     
     def assemble_frame_load(self, param: torch.Tensor) -> torch.Tensor:
-        """ Compute F*b, where b is the load vector, and F* is the analysis operator
-        """
         # param.shape = (batch_size, dim(param))
         device = param.device
         assert param.ndim == 2
@@ -442,7 +491,7 @@ def _assemble_laplacian_diag_level(
     mesh = Mesh1D(n=2 ** (idx_level + 1), float_type=float_type, device=device)
     num_nodes = mesh.num_nodes
     num_dofs = num_nodes
-    dofs = torch.arange(num_dofs, dtype=torch.int32, device=device)
+    dofs = torch.arange(num_dofs, dtype=torch.int64, device=device)
     free_dofs_mask = torch.ones(num_dofs, dtype=torch.bool, device=device)
     free_dofs_mask[dofs[mesh.dirichlet_mask]] = False
     free_dofs = dofs[free_dofs_mask]
@@ -486,11 +535,9 @@ def _assemble_parametric_diag(
 def _compute_local_differential(
         element_nodes_coords: torch.Tensor,
         ) -> torch.Tensor:
-    
     # Compute the length and midpoint of the elements
     # h.shape = midpoint.shape = (num_elements,)
     h = torch.abs(element_nodes_coords[:, 0] - element_nodes_coords[:, 1])
-    
     # dNdx.shape = (num_elements, 2)
     dNdx = torch.cat((-1.0 / h[:, None], 1.0 / h[:, None]), dim=1)
     return dNdx
@@ -515,7 +562,7 @@ def _assemble_differential_matrix(
         mat[idx_element, element] = local_differential[idx_element]
     return mat[:, free_dofs]
 
-def _differential_frame_matrix_level(
+def _diff_frame_level(
         idx_level: int,
         quadrature_points: torch.Tensor,
         float_type: torch.dtype,
@@ -526,7 +573,7 @@ def _differential_frame_matrix_level(
     nodes = mesh.nodes 
     elements = mesh.elements
     num_dofs = nodes.size(0)
-    dofs = torch.arange(num_dofs, dtype=torch.int32, device=device)
+    dofs = torch.arange(num_dofs, dtype=torch.int64, device=device)
     dirichlet_dofs = dofs[mesh.dirichlet_mask]
     free_dofs_mask = torch.ones(num_dofs, dtype=torch.bool, device=device)
     free_dofs_mask[dirichlet_dofs] = False
@@ -562,15 +609,171 @@ def _diff_frame_scaled_per_level(
     for idx_level in range(num_levels):
         num_nodes_current_level = 2 ** (idx_level + 1) - 1
         coeff_end_idx = coeff_start_idx + num_nodes_current_level
-        sqrt_diag_current = sqrt_diag_inv_per_level[idx_level, :num_nodes_current_level]
-        mat = _differential_frame_matrix_level(
+        sqrt_diag_inv_current = sqrt_diag_inv_per_level[idx_level, :num_nodes_current_level]
+        mat = _diff_frame_level(
             idx_level=idx_level, 
             quadrature_points=midpoint,
             float_type=float_type,
             device=device)
-        scaled_mat[:, coeff_start_idx:coeff_end_idx] = mat * sqrt_diag_current
+        scaled_mat[:, coeff_start_idx:coeff_end_idx] = mat * sqrt_diag_inv_current
         coeff_start_idx = coeff_end_idx
     return scaled_mat
+
+def _compute_quadrature_points_element_index_level(
+        idx_level: int,
+        quadrature_points: torch.Tensor,
+        ):
+    float_type = quadrature_points.dtype
+    device = quadrature_points.device
+    # Generate the mesh for this level
+    mesh = Mesh1D(n=2 ** (idx_level + 1), float_type=float_type, device=device)
+    nodes = mesh.nodes 
+    elements = mesh.elements
+    # element_nodes_coords.shape = (num_elements, 2)
+    element_nodes_coords = nodes[elements]
+    end_point_min = torch.min(input=element_nodes_coords, dim=1, keepdim=True)[0]
+    end_point_max = torch.max(input=element_nodes_coords, dim=1, keepdim=True)[0]
+    # quadrature_points.shape = (num_points, 1)
+    # index_mask.shape = (num_points, num_elements)
+    quadrature_points = quadrature_points.unsqueeze(-1)
+    index_mask = (quadrature_points >= end_point_min.T) & (quadrature_points < end_point_max.T)
+    index_element = torch.arange(elements.size(0)).expand(quadrature_points.size(0), -1)
+    # index_element.shape = (num_points,)
+    index_element = index_element[index_mask]
+    return index_element
+
+def _compute_quadrature_points_element_index_per_level(
+        num_levels: int,
+        quadrature_points: torch.Tensor,
+        ) -> torch.Tensor:
+    device = quadrature_points.device
+    num_points = quadrature_points.size(0)
+    index_element_per_level = torch.zeros(num_points, num_levels, dtype=torch.int64, device=device)
+    for idx_level in range(num_levels):
+        index_element_per_level[:, idx_level] = _compute_quadrature_points_element_index_level(
+            idx_level=idx_level,
+            quadrature_points=quadrature_points,
+        )
+    return index_element_per_level
+
+def _diff_frame_scaled_vec_prod_level(
+        mesh: Mesh1D,
+        index_elements_level: torch.Tensor,
+        sqrt_diag_inv_level: torch.Tensor,
+        input_vec: torch.Tensor,
+        ) -> torch.Tensor:
+    float_type = input_vec.dtype
+    device = input_vec.device
+    nodes = mesh.nodes 
+    elements = mesh.elements
+    free_dofs = mesh.free_dofs
+    # 
+    batch_size = input_vec.size(0)
+    num_free_dofs = input_vec.size(1)
+    input_vec_scaled_reduced = input_vec * sqrt_diag_inv_level.unsqueeze(0)
+    input_vec_scaled = torch.zeros(batch_size, num_free_dofs + 2, dtype=float_type, device=device)
+    input_vec_scaled[:, free_dofs] = input_vec_scaled_reduced
+    #
+    local_diff = _compute_local_differential(element_nodes_coords=nodes[elements])
+    # local_diff_quadrature_points.shape = (num_points, 2)
+    local_diff_quadrature_points = local_diff[index_elements_level]
+    # global_dofs.shape = (num_points, 2)
+    global_dofs = elements[index_elements_level]
+    # local_vec.shape = (batch_size, num_points, 2)
+    local_vec_scaled = input_vec_scaled[:, global_dofs]
+    # product
+    prod = torch.einsum("pi,bpi->bp", local_diff_quadrature_points, local_vec_scaled)
+    return prod 
+
+
+def _diff_frame_scaled_vec_prod_per_level(
+        mesh_per_level: Tuple[Mesh1D, ...],
+        index_elements_per_level: torch.Tensor,
+        sqrt_diag_inv_per_level: torch.Tensor,
+        input_coefficients: torch.Tensor,
+        ) -> torch.Tensor:
+    float_type = input_coefficients.dtype
+    device = input_coefficients.device
+
+    num_levels = len(mesh_per_level)
+    batch_size = input_coefficients.size(0)
+    num_points = index_elements_per_level.size(0)
+    prod = torch.zeros(batch_size, num_points, dtype=float_type, device=device)
+
+    coeff_start_idx = 0
+    for idx_level in range(num_levels):
+        num_nodes_current_level = 2 ** (idx_level + 1) - 1
+        coeff_end_idx = coeff_start_idx + num_nodes_current_level
+        sqrt_diag_inv_current = sqrt_diag_inv_per_level[idx_level, :num_nodes_current_level]
+        prod += _diff_frame_scaled_vec_prod_level(
+            mesh=mesh_per_level[idx_level],
+            index_elements_level=index_elements_per_level[:, idx_level],
+            sqrt_diag_inv_level=sqrt_diag_inv_current,
+            input_vec=input_coefficients[:, coeff_start_idx:coeff_end_idx],
+        )
+        coeff_start_idx = coeff_end_idx
+    return prod
+
+
+def _diff_frame_scaled_trans_vec_prod_level(
+        mesh: Mesh1D,
+        index_elements_level: torch.Tensor,
+        sqrt_diag_inv_level: torch.Tensor,
+        input_vec: torch.Tensor,
+        ) -> torch.Tensor:
+    float_type = input_vec.dtype
+    device = input_vec.device
+    nodes = mesh.nodes 
+    elements = mesh.elements
+    free_dofs = mesh.free_dofs
+    batch_size = input_vec.size(0)
+    num_nodes = nodes.size(0)
+    #
+    local_diff = _compute_local_differential(element_nodes_coords=nodes[elements])
+    # local_diff_quadrature_points.shape = (num_points, 2)
+    local_diff_quadrature_points = local_diff[index_elements_level]
+    # global_dofs.shape = (num_points, 2)
+    global_dofs = elements[index_elements_level]
+
+    # scatter 
+    # output_vec.shape = (batch_size, num_nodes)
+    src = local_diff_quadrature_points.unsqueeze(0) * input_vec.unsqueeze(-1)
+    src = src.reshape(batch_size, -1)
+    index = global_dofs.reshape(1, -1).expand(batch_size, -1)
+    output_vec = torch.zeros(batch_size, num_nodes, dtype=float_type, device=device)
+    output_vec.scatter_add_(dim=1, index=index, src=src)
+    # scale
+    return output_vec[:, free_dofs] * sqrt_diag_inv_level.unsqueeze(0)
+ 
+
+def _diff_frame_scaled_trans_vec_prod_per_level(
+        mesh_per_level: Tuple[Mesh1D, ...],
+        index_elements_per_level: torch.Tensor,
+        sqrt_diag_inv_per_level: torch.Tensor,
+        input_vec: torch.Tensor,
+        ) -> torch.Tensor:
+    float_type = input_vec.dtype
+    device = input_vec.device
+
+    num_levels = len(mesh_per_level)
+    batch_size = input_vec.size(0)
+    num_coefficients = sum(2 ** (k + 1) - 1 for k in range(num_levels))
+    prod = torch.zeros(batch_size, num_coefficients, dtype=float_type, device=device)
+
+    coeff_start_idx = 0
+    for idx_level in range(num_levels):
+        num_nodes_current_level = 2 ** (idx_level + 1) - 1
+        coeff_end_idx = coeff_start_idx + num_nodes_current_level
+        sqrt_diag_inv_current = sqrt_diag_inv_per_level[idx_level, :num_nodes_current_level]
+        prod[:, coeff_start_idx:coeff_end_idx] = _diff_frame_scaled_trans_vec_prod_level(
+            mesh=mesh_per_level[idx_level],
+            index_elements_level=index_elements_per_level[:, idx_level],
+            sqrt_diag_inv_level=sqrt_diag_inv_current,
+            input_vec=input_vec,
+        )
+        coeff_start_idx = coeff_end_idx
+    return prod
+
 
 # ------------------- Local matrix and local laod vector ------------- 
 
@@ -620,7 +823,7 @@ def _compute_local_vector(
     # N_mid.shape = (2,)
     N_mid = torch.tensor([0.5, 0.5], dtype=float_type, device=device) 
     # local_vector.shape = (num_elements, 2)
-    local_vector = -source_mid * N_mid[None, :] * h[:, None]
+    local_vector = source_mid * N_mid[None, :] * h[:, None]
     return local_vector
 
 # ------------------- Assembly -----------------
@@ -645,7 +848,7 @@ def _assemble_mat_vec_prod(
     element_nodes_coords = nodes[elements]
     
     # Gather input vectors with optimized indexing
-    # input_vec_local.shape = (batch_size, num_elements, 4, 1)
+    # input_vec_local.shape = (batch_size, num_elements, 2, 1)
     local_input_vec = input_vec[:, global_dofs].unsqueeze(-1)
     
     # Compute local matrices with vectorized operations
@@ -654,7 +857,7 @@ def _assemble_mat_vec_prod(
             element_nodes_coords=element_nodes_coords)
     
     # Local matrix-vector product with optimized einsum
-    # local_mat_vec_prod.shape = (batch_size, num_elements, 4)
+    # local_mat_vec_prod.shape = (batch_size, num_elements, 2)
     local_mat_vec_prod = torch.einsum(
         "beik,bekj->beij", local_mat, local_input_vec).squeeze(-1)
     
@@ -673,28 +876,17 @@ def _compute_local_matrix_single_element(
         diffusion_param_fn: Callable,
         element_nodes_coords: torch.Tensor,
         ):
-    float_type = param.dtype
     # param.shape = (batch_size, dim(param))
     assert param.ndim == 2
     # Compute the length and midpoint of the element: [nodes_coords[0], nodes_coords[1]]
     h: torch.Tensor = torch.abs(element_nodes_coords[0] - element_nodes_coords[1])
     midpoint: torch.Tensor = 0.5 * (element_nodes_coords[0] + element_nodes_coords[1])
     # Numerical integration over the current element using midpoint rule
-    diffusion_inv_mid = 1.0 / diffusion_param_fn(param, midpoint)[:, None, None]
-    N_mid = torch.tensor([0.5, 0.5], dtype=float_type)
-    dNdx = torch.tensor([-1.0 / h, 1.0 / h], dtype=float_type)
-    NN_mid = torch.outer(N_mid, N_mid)
+    diffusion_mid = diffusion_param_fn(param, midpoint)[:, None, None]
+    dNdx = torch.cat((-1.0 / h, 1.0 / h), dim=1)
     dNdxdNdx = torch.outer(dNdx, dNdx)
-    NdNdx_mid = torch.outer(N_mid, dNdx)
-    # Assemble the 4x4 local matrix for the (sigma, u) system
-    batch_size: int = param.size(0)
-    local_matrix = torch.zeros(batch_size, 4, 4, dtype=float_type)
-    local_matrix[:, 0:2, 0:2] = NN_mid * diffusion_inv_mid * diffusion_inv_mid + dNdxdNdx
-    local_matrix[:, 0:2, 2:4] = -diffusion_inv_mid * NdNdx_mid
-    local_matrix[:, 2:4, 0:2] = -diffusion_inv_mid * NdNdx_mid.T
-    local_matrix[:, 2:4, 2:4] = dNdxdNdx
-    local_matrix = local_matrix * h
-    # local_matrix.shape = (batch_size, 4, 4)
+    local_matrix = diffusion_mid * dNdxdNdx * h
+    # local_matrix.shape = (batch_size, 2, 2)
     return local_matrix
 
 def _assemble(
@@ -709,13 +901,13 @@ def _assemble(
     float_type = param.dtype
     # The number of nodes and number of degrees of freedom
     num_nodes: int = nodes.size(0)
-    num_dofs: int =  2 * num_nodes
+    num_dofs: int =  num_nodes
     num_elems: int = elements.size(0)
     # Initialize arrays for Coordinate (triplet) format (I, J, V)
-    # Each 1D element has a 4x4 matrix, so 16 non-zero entries.
-    num_entries: int = 16 * num_elems
-    I = torch.zeros(num_entries, dtype=torch.int32)
-    J = torch.zeros(num_entries, dtype=torch.int32)
+    # Each 1D element has a 2x2 matrix, so 4 non-zero entries.
+    num_entries: int = 4 * num_elems
+    I = torch.zeros(num_entries, dtype=torch.int64)
+    J = torch.zeros(num_entries, dtype=torch.int64)
     V = torch.zeros(num_entries, dtype=float_type)
     # Assemble the global matrix and vector
     for idx, elem in enumerate(elements):
@@ -727,8 +919,8 @@ def _assemble(
         global_dofs = torch.cat((elem, num_nodes + elem))
         global_rows, global_cols = torch.meshgrid(global_dofs, global_dofs)
         # Get the indices for the next 4 entries in our I, J, V arrays
-        start_idx: int = 16 * idx
-        end_idx: int = 16 * (idx + 1)
+        start_idx: int = 4 * idx
+        end_idx: int = 4 * (idx + 1)
         # Store the row indices, column indices, and values
         I[start_idx:end_idx] = global_rows.flatten()
         J[start_idx:end_idx] = global_cols.flatten()
@@ -752,8 +944,8 @@ def _assemble(
     # Remap the global indices to the local indices of the reduced matrix
     # First, create a mapping array
     num_free_dofs: int = len(free_dofs)
-    dof_remapper = torch.zeros(num_dofs, dtype=torch.int32)
-    dof_remapper[free_dofs] = torch.arange(num_free_dofs, dtype=torch.int32)
+    dof_remapper = torch.zeros(num_dofs, dtype=torch.int64)
+    dof_remapper[free_dofs] = torch.arange(num_free_dofs, dtype=torch.int64)
     # Then, apply the mapping
     I_mapped = dof_remapper[I_reduced]
     J_mapped = dof_remapper[J_reduced]
