@@ -772,7 +772,7 @@ def _diff_frame_scaled_trans_vec_prod_per_level(
     return prod
 
 
-# ------------------- Local matrix and local laod vector ------------- 
+# ------------------- Local matrix and local load vector ------------- 
 
 def _compute_local_matrix(
         param: torch.Tensor,
