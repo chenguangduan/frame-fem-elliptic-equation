@@ -1,4 +1,5 @@
 import abc
+from typing import Union, overload
 
 import torch 
 
@@ -23,7 +24,23 @@ class Mesh1D(abc.ABC):
         self.dirichlet_mask: torch.Tensor = self._compute_dirichlet_mask()
         self.free_dofs = self._compute_free_dofs()
 
-    def to(self, device: torch.device):
+    @overload 
+    def to(self, input: torch.device):
+        ...
+
+    @overload
+    def to(self, input: torch.dtype):
+        ...
+
+    def to(self, input: Union[torch.device, torch.dtype]):
+        if isinstance(input, torch.device):
+            return self.set_device(input)
+        elif isinstance(input, torch.dtype):
+            return self.set_float_precision(input)  
+        else:
+            raise TypeError("Unsupported data type")
+
+    def set_device(self, device: torch.device):
         """ Move tensor atttibutes to device
         """
         device = torch.device(device)
@@ -40,7 +57,7 @@ class Mesh1D(abc.ABC):
         self.device = device 
         return self
     
-    def set_float_type(self, float_type: torch.dtype):
+    def set_float_precision(self, float_type: torch.dtype):
         """ Set the precision of float tensor attributes
         """
         # Float tensor attributes that need to be set the float type

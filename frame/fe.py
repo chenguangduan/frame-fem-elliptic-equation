@@ -1,5 +1,5 @@
 import abc
-from typing import List, Tuple, Callable, cast, Optional
+from typing import List, Tuple, Callable, cast, Optional, Union, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -58,13 +58,29 @@ class FiniteElementElliptic1D(abc.ABC):
             sqrt_diag_inv_per_level=self.sqrt_diag_inv_per_level
         )
 
-    def to(self, device: torch.device):
+    @overload 
+    def to(self, input: torch.device):
+        ...
+
+    @overload
+    def to(self, input: torch.dtype):
+        ...
+
+    def to(self, input: Union[torch.device, torch.dtype]):
+        if isinstance(input, torch.device):
+            return self.set_device(input)
+        elif isinstance(input, torch.dtype):
+            return self.set_float_precision(input)  
+        else:
+            raise TypeError("Unsupported data type")
+
+    def set_device(self, device: torch.device):
         device = torch.device(device)
         # List of tensor attributes to be moved
         tensor_attributes_name = [
             "nodes", "elements", "dofs", "dirichlet_dofs", 
             "free_dofs_mask", "free_dofs", "sqrt_diag_inv_per_level",
-            "index_elements_per_level"
+            "index_elements_per_level", "diff_frame_scaled_per_level"
         ]
         for attribute_name in tensor_attributes_name:
             tensor = getattr(self, attribute_name)
@@ -77,10 +93,20 @@ class FiniteElementElliptic1D(abc.ABC):
     def cpu(self):
         return self.to(torch.device("cpu"))
     
+    def set_float_precision(self, float_type: torch.dtype):
+        if float_type == torch.float16:
+            return self.half()
+        elif float_type == torch.float32:
+            return self.float()
+        elif float_type == torch.float64:
+            return self.double()
+        else:
+            raise ValueError(f"Invalid float type {float_type}.")
+    
     def double(self):
         # List of tensor attributes
         float_tensor_attributes_name = [
-            "nodes", "sqrt_diag_inv_per_level",
+            "nodes", "sqrt_diag_inv_per_level", "diff_frame_scaled_per_level"
         ]
         for attribute_name in float_tensor_attributes_name:
             float_tensor = getattr(self, attribute_name)
@@ -93,7 +119,7 @@ class FiniteElementElliptic1D(abc.ABC):
     def float(self):
         # List of tensor attributes
         float_tensor_attributes_name = [
-            "nodes", "sqrt_diag_inv_per_level",
+            "nodes", "sqrt_diag_inv_per_level", "diff_frame_scaled_per_level"
         ]
         for attribute_name in float_tensor_attributes_name:
             float_tensor = getattr(self, attribute_name)
@@ -106,7 +132,7 @@ class FiniteElementElliptic1D(abc.ABC):
     def half(self):
         # List of tensor attributes
         float_tensor_attributes_name = [
-            "nodes", "sqrt_diag_inv_per_level",
+            "nodes", "sqrt_diag_inv_per_level", "diff_frame_scaled_per_level"
         ]
         for attribute_name in float_tensor_attributes_name:
             float_tensor = getattr(self, attribute_name)
@@ -180,7 +206,7 @@ class FiniteElementElliptic1D(abc.ABC):
         )
         return vector_finest
     
-    def assemble_frame_mat_coef_prod_decomposition(
+    def assemble_frame_stiffness_coef_prod_decomposition(
             self, 
             param: torch.Tensor,
             input_coefficient: torch.Tensor,
@@ -203,7 +229,7 @@ class FiniteElementElliptic1D(abc.ABC):
             input_vec=diff_frame_prod * param_diag
         )
     
-    def assemble_frame_mat_coef_prod_decomposition_mat(
+    def assemble_frame_stiffness_coef_prod_decomposition_mat(
             self, 
             param: torch.Tensor,
             input_coefficient: torch.Tensor,
@@ -224,7 +250,7 @@ class FiniteElementElliptic1D(abc.ABC):
         )
         return output
     
-    def assemble_frame_mat_coef_prod(
+    def assemble_frame_stiffness_coef_prod(
             self, 
             param: torch.Tensor,
             input_coefficient: torch.Tensor,
@@ -245,7 +271,7 @@ class FiniteElementElliptic1D(abc.ABC):
             solution_reduced=vector_finest_reduced)
         # Compute the matrix-vector product
         # mat_vec_prod.shape = (batch_size, num_dofs)
-        mat_vec_prod = _assemble_mat_vec_prod(
+        mat_vec_prod = _assemble_stiffness_vec_prod(
             param=param, 
             diffusion_param_fn=diffusion_param_fn, 
             input_vec=vector_finest, 
@@ -348,7 +374,7 @@ def _assemble_load(
     # F_global.shape = (num_dofs)
     F_global = torch.zeros(num_dofs, dtype=float_type, device=device)
     # local_vector.shape = (num_elements, 2)
-    local_vector = _compute_local_vector(source_fn=source_fn, element_nodes_coords=nodes[elements])
+    local_vector = _compute_local_load(source_fn=source_fn, element_nodes_coords=nodes[elements])
     # global_dofs.shape = (num_elements, 2)
     global_dofs = elements
     # scatter
@@ -777,8 +803,7 @@ def _compute_local_matrix(
     local_matrix = diffusion_mid * dNdxdNdx * h[None, :, None, None]
     return local_matrix
 
-
-def _compute_local_vector(
+def _compute_local_load(
         source_fn: Callable, 
         element_nodes_coords: torch.Tensor,
         ):
@@ -799,7 +824,7 @@ def _compute_local_vector(
 
 # ------------------- Assembly -----------------
 
-def _assemble_mat_vec_prod(
+def _assemble_stiffness_vec_prod(
         param: torch.Tensor,
         diffusion_param_fn,
         input_vec: torch.Tensor,

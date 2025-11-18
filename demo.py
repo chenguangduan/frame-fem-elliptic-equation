@@ -38,7 +38,7 @@ def main():
     float_type = torch.float16
     device = torch.device("cpu")
 
-    param = torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=float_type, device=device)
+    param = torch.tensor([1.0, 0.8, 1.4, 0.7], dtype=float_type, device=device)
     param = param.unsqueeze(0)
 
     param_pde = ParametricEllipticPDE(
@@ -53,25 +53,25 @@ def main():
         float_type=float_type, 
         device=device)
     
-    #diff_frame_scaled_per_level = fe.diff_frame_scaled_per_level
-    #cond = compute_condition_number(diff_frame_scaled_per_level)
-    #print(f"number of levels = {num_levels}, condition number = {cond}")
+    # compute the condition number
+    diff_frame_scaled_per_level = fe.diff_frame_scaled_per_level.double()
+    cond = compute_condition_number(diff_frame_scaled_per_level)
+    print(f"number of levels = {num_levels}, condition number = {cond}")
 
     num_coefficients = fe.num_coefficients
     test_coefficient = torch.rand(1, num_coefficients, dtype=float_type, device=device)
     # decomposition
-    output_decomposition_mat = fe.assemble_frame_mat_coef_prod_decomposition_mat(
+    output_decomposition_mat = fe.assemble_frame_stiffness_coef_prod_decomposition_mat(
         param=param,
         input_coefficient=test_coefficient
     )
     # decomposition
-    output_decomposition = fe.assemble_frame_mat_coef_prod_decomposition(
+    output_decomposition = fe.assemble_frame_stiffness_coef_prod_decomposition(
         param=param,
         input_coefficient=test_coefficient
     )
     # original
-    fe_double = fe.double()
-    output = fe_double.assemble_frame_mat_coef_prod(
+    output = fe.double().assemble_frame_stiffness_coef_prod(
         param=param,
         input_coefficient=test_coefficient
     ).to(float_type)
